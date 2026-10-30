@@ -1,0 +1,2 @@
+.ci/home-probe.sh text eol=lf
+.ci/Dockerfile text eol=lf

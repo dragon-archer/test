@@ -1,0 +1,77 @@
+name: Investigate MSYS2 HOME
+
+on:
+  workflow_dispatch:
+    inputs:
+      installer_run_id:
+        description: 'Optional installer run ID: 40851223488 (before), 41075811564 (after); blank uses nightly'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: ${{ matrix.target }}-${{ matrix.image }}
+    runs-on: windows-${{ matrix.image }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [2022, 2025]
+        target: [sfx, docker]
+    steps:
+      - name: Inspect runner HOME before checkout
+        shell: pwsh
+        run: |
+          Write-Host "PowerShell HOME=$HOME"
+          Write-Host "Environment HOME=$env:HOME"
+          Write-Host "USERPROFILE=$env:USERPROFILE"
+
+      - name: Checkout diagnostics
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Download MSYS2 SFX
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.INSTALLER_ARTIFACT_TOKEN || github.token }}
+          INSTALLER_RUN_ID: ${{ inputs.installer_run_id }}
+        run: |
+          Write-Host "Environment HOME=$env:HOME; PowerShell HOME=$HOME"
+          $ProgressPreference = 'SilentlyContinue'
+          if ($env:INSTALLER_RUN_ID) {
+            Write-Host "Using msys2-installer run $env:INSTALLER_RUN_ID"
+            gh run download $env:INSTALLER_RUN_ID --repo msys2/msys2-installer --name installer-signed --dir installer-artifacts
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Move-Item installer-artifacts/msys2-base-x86_64-latest.sfx.exe .ci/msys2.exe
+          } else {
+            Write-Host 'Using public nightly SFX'
+            Invoke-WebRequest -Uri https://github.com/msys2/msys2-installer/releases/download/nightly-x86_64/msys2-base-x86_64-latest.sfx.exe -OutFile .ci/msys2.exe
+          }
+
+      - name: Diagnose SFX on the host
+        if: matrix.target == 'sfx'
+        shell: pwsh
+        run: ./.ci/diagnose-home.ps1 -Destination C:/msys2-home-test
+
+      - name: Start Docker
+        if: matrix.target == 'docker'
+        shell: pwsh
+        run: |
+          Write-Host "Environment HOME=$env:HOME; PowerShell HOME=$HOME"
+          if ((Get-Service docker).Status -ne 'Running') { Start-Service docker }
+
+      - name: Diagnose SFX inside Docker
+        if: matrix.target == 'docker'
+        shell: pwsh
+        env:
+          WINDOWS_VERSION: ltsc${{ matrix.image }}
+        run: |
+          Write-Host "Environment HOME=$env:HOME; PowerShell HOME=$HOME"
+          docker build --no-cache --build-arg "WINDOWS_VERSION=$env:WINDOWS_VERSION" --tag msys2-home --file .ci/Dockerfile .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          docker run --rm msys2-home powershell -NoProfile -Command 'Write-Host "Container HOME=$env:HOME; USERPROFILE=$env:USERPROFILE"; & C:/msys64/usr/bin/bash.exe -lc ''. C:/diagnostics/home-probe.sh fresh-container-login'''
+          exit $LASTEXITCODE
